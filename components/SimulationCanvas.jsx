@@ -106,7 +106,7 @@ function applyPoseLerp(boneMap, targetPose, alpha) {
 // ---------------------------------------------------------------------------
 
 function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
-  const { scene } = useGLTF('/model.glb');
+  const { scene, animations } = useGLTF('/model.glb');
   const boneMapRef = useRef({});
   const stateRef   = useRef({
     tokenIndex:  -1,
@@ -114,7 +114,7 @@ function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
     currentPose: REST_POSE,
   });
 
-  // Build bone map once the scene loads
+  // Build bone map + neutralise embedded animations on load
   useEffect(() => {
     const map = buildBoneMap(scene);
     boneMapRef.current = map;
@@ -131,7 +131,23 @@ function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
         console.info(`[HandRig] Bone map ready — ${count} bones found.`);
       }
     }
-  }, [scene]);
+
+    // The GLB ships with an embedded Mixamo idle animation
+    // ('Armature|mixamo.com|Layer0'). If an AnimationMixer runs it, it will
+    // overwrite our manual LERP rotations every frame. We neutralise it by
+    // resetting all bone rotations to identity after load so the rig starts
+    // from a clean T-pose and we have full control.
+    if (animations && animations.length > 0) {
+      // Create a temporary mixer just to get the action, then immediately
+      // reset it so no keyframe data is applied.
+      const mixer = new THREE.AnimationMixer(scene);
+      for (const clip of animations) {
+        mixer.clipAction(clip).reset().stop();
+      }
+      mixer.stopAllAction();
+      console.info(`[HandRig] Neutralised ${animations.length} embedded animation(s).`);
+    }
+  }, [scene, animations]);
 
   // When new tokens arrive or playback starts, reset to first token
   useEffect(() => {
