@@ -10,7 +10,7 @@
  *  - Deterministic sign sequencing driven by token queue from parent
  */
 
-import { useRef, useEffect, useMemo, useState, useCallback } from 'react';
+import { useRef, useEffect, useMemo, useState, useCallback, Suspense } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, OrbitControls, Environment, Center, ContactShadows } from '@react-three/drei';
 import * as THREE from 'three';
@@ -20,10 +20,10 @@ import * as THREE from 'three';
 // ---------------------------------------------------------------------------
 
 /** How long (seconds) to hold each sign before advancing */
-const SIGN_HOLD_DURATION = 0.9;
+const SIGN_HOLD_DURATION = 1.2;
 
-/** LERP speed — higher = faster transitions (applied per frame: 1 - (1-speed)^dt*60) */
-const LERP_SPEED = 8.0;
+/** LERP speed — lower = more gradual, visible transitions */
+const LERP_SPEED = 5.0;
 
 /** Neutral / rest pose: all finger joints at 0 */
 const REST_POSE = [
@@ -50,32 +50,35 @@ const REST_POSE = [
 // ---------------------------------------------------------------------------
 
 /**
- * Build a bone lookup map { boneName: THREE.Bone } from a SkinnedMesh scene.
- * Traverses the entire scene graph.
+ * Build a bone lookup map { boneName: THREE.Object3D } from a GLTF scene.
+ *
+ * FIX (Bug #1): Modern Three.js GLTF-loaded bones are plain Object3D nodes —
+ * they do NOT have isBone===true or type==='Bone'. We match by name prefix
+ * ('mixamorig:') which is reliable for Mixamo rigs, and also sweep skeleton
+ * bones from any SkinnedMesh found in the scene.
  */
 function buildBoneMap(scene) {
   const map = {};
+
   scene.traverse((obj) => {
-    if (obj.isBone || obj.type === 'Bone') {
+    // Match Mixamo bone nodes by name prefix — works regardless of Object3D type
+    if (obj.name && obj.name.startsWith('mixamorig:')) {
       map[obj.name] = obj;
     }
-    // Also check SkinnedMesh skeleton bones
+    // Also sweep skeleton bone arrays on any SkinnedMesh
     if (obj.isSkinnedMesh && obj.skeleton) {
       for (const bone of obj.skeleton.bones) {
-        map[bone.name] = bone;
+        if (bone.name) map[bone.name] = bone;
       }
     }
   });
+
   return map;
 }
 
 /**
  * Frame-rate-independent LERP factor.
- * Returns a factor that, when applied each frame, gives a smooth transition
- * regardless of frame rate.
- *
- * factor = 1 - (1 - speed/60)^(delta * 60)
- * Simplified to: 1 - e^(-speed * delta)  (equivalent for small delta)
+ * factor = 1 - e^(-speed * delta)
  */
 function lerpFactor(speed, delta) {
   return 1 - Math.exp(-speed * delta);
@@ -83,7 +86,7 @@ function lerpFactor(speed, delta) {
 
 /**
  * Apply a pose (array of { bone, x, y, z }) to a boneMap using LERP.
- * @param {Record<string,THREE.Bone>} boneMap
+ * @param {Record<string,THREE.Object3D>} boneMap
  * @param {Array<{bone:string,x:number,y:number,z:number}>} targetPose
  * @param {number} alpha - LERP alpha [0,1]
  */
@@ -92,7 +95,6 @@ function applyPoseLerp(boneMap, targetPose, alpha) {
     const bone = boneMap[boneName];
     if (!bone) continue;
 
-    // THREE.MathUtils.lerp: lerp(a, b, t) = a + (b - a) * t
     bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, x, alpha);
     bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, y, alpha);
     bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, z, alpha);
@@ -105,23 +107,37 @@ function applyPoseLerp(boneMap, targetPose, alpha) {
 
 function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
   const { scene } = useGLTF('/model.glb');
-  const boneMapRef   = useRef({});
-  const stateRef     = useRef({
-    tokenIndex: -1,   // -1 → showing rest pose
-    holdTimer:  0,
+  const boneMapRef = useRef({});
+  const stateRef   = useRef({
+    tokenIndex:  -1,
+    holdTimer:   0,
     currentPose: REST_POSE,
   });
 
   // Build bone map once the scene loads
   useEffect(() => {
-    boneMapRef.current = buildBoneMap(scene);
+    const map = buildBoneMap(scene);
+    boneMapRef.current = map;
+
+    if (process.env.NODE_ENV !== 'production') {
+      const count = Object.keys(map).length;
+      if (count === 0) {
+        console.warn('[HandRig] buildBoneMap found 0 bones — check rig naming.');
+        // Debug: log all object names to help diagnose
+        const names = [];
+        scene.traverse((o) => { if (o.name) names.push(`${o.type}: ${o.name}`); });
+        console.warn('[HandRig] Scene objects:', names.slice(0, 40));
+      } else {
+        console.info(`[HandRig] Bone map ready — ${count} bones found.`);
+      }
+    }
   }, [scene]);
 
   // When new tokens arrive or playback starts, reset to first token
   useEffect(() => {
     if (isPlaying && tokens.length > 0) {
-      stateRef.current.tokenIndex = 0;
-      stateRef.current.holdTimer  = 0;
+      stateRef.current.tokenIndex  = 0;
+      stateRef.current.holdTimer   = 0;
       stateRef.current.currentPose = dictionary[tokens[0].token] ?? REST_POSE;
     } else if (!isPlaying) {
       stateRef.current.tokenIndex  = -1;
@@ -133,12 +149,13 @@ function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
   useFrame((_, delta) => {
     const state   = stateRef.current;
     const boneMap = boneMapRef.current;
+
+    // Guard: bone map must be populated
     if (!boneMap || Object.keys(boneMap).length === 0) return;
 
     const alpha = lerpFactor(LERP_SPEED, delta);
 
     if (!isPlaying || tokens.length === 0 || state.tokenIndex < 0) {
-      // Smoothly return to rest pose
       applyPoseLerp(boneMap, REST_POSE, alpha);
       return;
     }
@@ -150,10 +167,9 @@ function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
       const nextIndex = state.tokenIndex + 1;
 
       if (nextIndex >= tokens.length) {
-        // Finished all tokens
         state.tokenIndex  = -1;
         state.currentPose = REST_POSE;
-        onTokenAdvance(-1); // signal completion
+        onTokenAdvance(-1);
       } else {
         state.tokenIndex  = nextIndex;
         const nextToken   = tokens[nextIndex].token;
@@ -181,10 +197,9 @@ useGLTF.preload('/model.glb');
 // ---------------------------------------------------------------------------
 
 function FallbackHand({ tokens, isPlaying, activeIndex }) {
-  const groupRef    = useRef();
-  const stateRef    = useRef({ time: 0 });
+  const groupRef = useRef();
+  const stateRef = useRef({ time: 0 });
 
-  // Simple idle float animation
   useFrame((_, delta) => {
     stateRef.current.time += delta;
     if (groupRef.current) {
@@ -214,27 +229,42 @@ function FallbackHand({ tokens, isPlaying, activeIndex }) {
         <boxGeometry args={[0.09, 0.23, 0.1]} />
         <meshStandardMaterial color={color} roughness={0.4} metalness={0.15} />
       </mesh>
-      {/* Current sign label */}
-      {isPlaying && tokens[activeIndex] && (
-        <group position={[0, 0.95, 0]}>
-          {/* We can't render text in a fallback without @react-three/drei Text, 
-              but we keep this slot for extension */}
-        </group>
-      )}
     </group>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Scene wrapper — handles GLTF error boundary
+// ModelLoader – FIX (Bug #3): do NOT use try/catch around useGLTF-based
+// components. useGLTF throws a Promise to trigger React Suspense; catching
+// it here calls onError() and permanently switches to FallbackHand before
+// the model ever loads.
+//
+// Solution: wrap HandRig in its own Suspense so the thrown Promise is caught
+// by React, not by our catch block. Actual load errors are handled by the
+// ErrorBoundary in SimulationCanvas.
+// ---------------------------------------------------------------------------
+
+function ModelLoader({ tokens, dictionary, onTokenAdvance, isPlaying, onError }) {
+  return (
+    <Suspense fallback={null}>
+      <HandRig
+        tokens={tokens}
+        dictionary={dictionary}
+        onTokenAdvance={onTokenAdvance}
+        isPlaying={isPlaying}
+      />
+    </Suspense>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scene wrapper
 // ---------------------------------------------------------------------------
 
 function SceneContent({ tokens, dictionary, onTokenAdvance, isPlaying, activeIndex }) {
   const [modelError, setModelError] = useState(false);
-
   const handleError = useCallback(() => setModelError(true), []);
 
-  // Try load model, fall back gracefully
   if (modelError) {
     return (
       <FallbackHand
@@ -256,24 +286,6 @@ function SceneContent({ tokens, dictionary, onTokenAdvance, isPlaying, activeInd
   );
 }
 
-function ModelLoader({ tokens, dictionary, onTokenAdvance, isPlaying, onError }) {
-  // Attempt to load — if useGLTF throws suspend, Suspense handles it.
-  // If the file truly 404s we catch in ErrorBoundary in SimulationCanvas.
-  try {
-    return (
-      <HandRig
-        tokens={tokens}
-        dictionary={dictionary}
-        onTokenAdvance={onTokenAdvance}
-        isPlaying={isPlaying}
-      />
-    );
-  } catch {
-    onError();
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // CameraSetup – positions camera once
 // ---------------------------------------------------------------------------
@@ -293,11 +305,11 @@ function CameraSetup() {
 // ---------------------------------------------------------------------------
 
 /**
- * @param {object}  props
- * @param {Array}   props.tokens      - Tokenized output from nlpUtils.tokenize()
- * @param {object}  props.dictionary  - Full dictionary map from loadDictionary()
- * @param {boolean} props.isPlaying   - True while animation should play
- * @param {number}  props.activeIndex - Index of currently displayed token
+ * @param {object}   props
+ * @param {Array}    props.tokens         - Tokenized output from nlpUtils.tokenize()
+ * @param {object}   props.dictionary     - Full dictionary map from loadDictionary()
+ * @param {boolean}  props.isPlaying      - True while animation should play
+ * @param {number}   props.activeIndex    - Index of currently displayed token
  * @param {function} props.onTokenAdvance - Called with new index each time a sign advances
  */
 export default function SimulationCanvas({
@@ -357,7 +369,7 @@ export default function SimulationCanvas({
           onTokenAdvance={onTokenAdvance}
         />
 
-        {/* Orbit controls: allow user to inspect from any angle */}
+        {/* Orbit controls */}
         <OrbitControls
           enablePan={false}
           minDistance={1.2}
