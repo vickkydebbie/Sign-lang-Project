@@ -1,16 +1,18 @@
 {
   "app/page.tsx -> @/components/SimulationCanvas": {
-    "id": "app/page.tsx -> @/components/SimulationCanvas",
+    "id": 2956,
     "files": [
-      "static/chunks/_app-pages-browser_components_SimulationCanvas_jsx.js"
+      "static/chunks/b536a0f1.1dcb2a09da2c089f.js",
+      "static/chunks/451.e83fe8b31c04d4cd.js",
+      "static/chunks/956.bafecbd8b53e858e.js"
     ]
   },
   "node_modules/@react-three/drei/core/VideoTexture.js -> hls.js": {
-    "id": "node_modules/@react-three/drei/core/VideoTexture.js -> hls.js",
+    "id": null,
     "files": []
   },
   "node_modules/@react-three/drei/web/FaceLandmarker.js -> @mediapipe/tasks-vision": {
-    "id": "node_modules/@react-three/drei/web/FaceLandmarker.js -> @mediapipe/tasks-vision",
+    "id": null,
     "files": []
   }
 }

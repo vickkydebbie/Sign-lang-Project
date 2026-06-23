@@ -18,20 +18,26 @@ const SimulationCanvas = dynamic(
 );
 
 // ---------------------------------------------------------------------------
-// Type helpers (JSDoc-typed for plain JS compat)
+// Types
 // ---------------------------------------------------------------------------
-/** @typedef {{ token: string, type: 'word'|'letter', source: string }} Token */
+interface Token {
+  token: string;
+  type: 'word' | 'letter';
+  source: string;
+}
 
 // ---------------------------------------------------------------------------
 // Web Speech API singleton
 // ---------------------------------------------------------------------------
-let recognitionInstance = null;
+let recognitionInstance: any = null;
 
 function getRecognition() {
   if (typeof window === 'undefined') return null;
   if (recognitionInstance) return recognitionInstance;
-  const SpeechRecognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
+  // SpeechRecognition is not in all TypeScript lib.dom definitions yet;
+  // cast to any to access vendor-prefixed and standard variants safely.
+  const w = window as any;
+  const SpeechRecognition = w.SpeechRecognition || w.webkitSpeechRecognition;
   if (!SpeechRecognition) return null;
   const r = new SpeechRecognition();
   r.continuous      = false;
@@ -44,7 +50,11 @@ function getRecognition() {
 // ---------------------------------------------------------------------------
 // MicButton component
 // ---------------------------------------------------------------------------
-function MicButton({ isListening, disabled, onClick }) {
+function MicButton({ isListening, disabled, onClick }: {
+  isListening: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       id="mic-btn"
@@ -82,7 +92,11 @@ function MicButton({ isListening, disabled, onClick }) {
 // ---------------------------------------------------------------------------
 // TokenBadge
 // ---------------------------------------------------------------------------
-function TokenBadge({ token, isActive, index }) {
+function TokenBadge({ token, isActive, index }: {
+  token: { token: string; type: 'word' | 'letter'; source: string };
+  isActive: boolean;
+  index: number;
+}) {
   return (
     <span
       style={{ animationDelay: `${index * 40}ms` }}
@@ -112,17 +126,17 @@ function TokenBadge({ token, isActive, index }) {
 export default function Page() {
   const [inputText,    setInputText]    = useState('');
   const [interimText,  setInterimText]  = useState('');
-  const [tokens,       setTokens]       = useState(/** @type {Token[]} */ ([]));
-  const [dictionary,   setDictionary]   = useState({});
-  const [dictKeys,     setDictKeys]     = useState(new Set());
+  const [tokens,       setTokens]       = useState<Token[]>([]);
+  const [dictionary,   setDictionary]   = useState<Record<string, any>>({});
+  const [dictKeys,     setDictKeys]     = useState<Set<string>>(new Set());
   const [isListening,  setIsListening]  = useState(false);
   const [isPlaying,    setIsPlaying]    = useState(false);
   const [activeIndex,  setActiveIndex]  = useState(0);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [statusMsg,    setStatusMsg]    = useState('');
 
-  const recognitionRef = useRef(null);
-  const inputRef       = useRef(null);
+  const recognitionRef = useRef<any>(null);
+  const inputRef       = useRef<HTMLInputElement>(null);
 
   // Load dictionary on mount
   useEffect(() => {
@@ -135,7 +149,8 @@ export default function Page() {
   // Check speech support
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+      const w = window as any;
+      const supported = !!(w.SpeechRecognition || w.webkitSpeechRecognition);
       setSpeechSupported(supported);
     }
   }, []);
@@ -144,7 +159,7 @@ export default function Page() {
   // Submit handler — tokenize text and start playback
   // ---------------------------------------------------------------------------
   const handleSubmit = useCallback(
-    (text) => {
+    (text: string) => {
       const raw = (text || inputText).trim();
       if (!raw) return;
 
@@ -172,7 +187,7 @@ export default function Page() {
     setInterimText('');
     setStatusMsg('Listening…');
 
-    recognition.onresult = (event) => {
+    recognition.onresult = (event: any) => {
       let interim = '';
       let finalStr = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -193,7 +208,7 @@ export default function Page() {
       }
     };
 
-    recognition.onerror = (event) => {
+    recognition.onerror = (event: any) => {
       console.warn('SpeechRecognition error:', event.error);
       setIsListening(false);
       setInterimText('');
@@ -226,7 +241,7 @@ export default function Page() {
   // ---------------------------------------------------------------------------
   // Token advance callback from canvas
   // ---------------------------------------------------------------------------
-  const handleTokenAdvance = useCallback((index) => {
+  const handleTokenAdvance = useCallback((index: number) => {
     if (index < 0) {
       setIsPlaying(false);
       setActiveIndex(0);

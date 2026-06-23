@@ -25,24 +25,26 @@ const SIGN_HOLD_DURATION = 1.2;
 /** LERP speed — lower = more gradual, visible transitions */
 const LERP_SPEED = 5.0;
 
-/** Neutral / rest pose: all finger joints at 0 */
+/** Neutral / rest pose: all finger joints at 0.
+ *  NOTE: uses 'mixamorig1:' to match the actual bone names in model.glb.
+ */
 const REST_POSE = [
-  { bone: 'mixamorig:RightHand',        x: 0, y: 0,    z: -0.15 },
-  { bone: 'mixamorig:RightHandThumb1',  x: 0, y: 0.3,  z: 0.2   },
-  { bone: 'mixamorig:RightHandThumb2',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandThumb3',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandIndex1',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandIndex2',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandIndex3',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandMiddle1', x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandMiddle2', x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandMiddle3', x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandRing1',   x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandRing2',   x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandRing3',   x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandPinky1',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandPinky2',  x: 0, y: 0,    z: 0     },
-  { bone: 'mixamorig:RightHandPinky3',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHand',        x: 0, y: 0,    z: -0.15 },
+  { bone: 'mixamorig1:RightHandThumb1',  x: 0, y: 0.3,  z: 0.2   },
+  { bone: 'mixamorig1:RightHandThumb2',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandThumb3',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandIndex1',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandIndex2',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandIndex3',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandMiddle1', x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandMiddle2', x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandMiddle3', x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandRing1',   x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandRing2',   x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandRing3',   x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandPinky1',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandPinky2',  x: 0, y: 0,    z: 0     },
+  { bone: 'mixamorig1:RightHandPinky3',  x: 0, y: 0,    z: 0     },
 ];
 
 // ---------------------------------------------------------------------------
@@ -61,8 +63,10 @@ function buildBoneMap(scene) {
   const map = {};
 
   scene.traverse((obj) => {
-    // Match Mixamo bone nodes by name prefix — works regardless of Object3D type
-    if (obj.name && obj.name.startsWith('mixamorig:')) {
+    // Match Mixamo bone nodes by name prefix.
+    // The model.glb uses 'mixamorig1:' (with a '1') — match both variants
+    // so the code works regardless of which Mixamo export the GLB came from.
+    if (obj.name && (obj.name.startsWith('mixamorig:') || obj.name.startsWith('mixamorig1:'))) {
       map[obj.name] = obj;
     }
     // Also sweep skeleton bone arrays on any SkinnedMesh
