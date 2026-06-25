@@ -120,6 +120,8 @@ export default function Page() {
   const [activeIndex,  setActiveIndex]  = useState(0);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [statusMsg,    setStatusMsg]    = useState('');
+  const [signSpeed,    setSignSpeed]    = useState(1.0);
+  const [cameraPreset, setCameraPreset] = useState<'front'|'side'|'angle'>('front');
 
   const recognitionRef = useRef(null);
   const inputRef       = useRef(null);
@@ -284,6 +286,8 @@ export default function Page() {
               isPlaying={isPlaying}
               activeIndex={activeIndex}
               onTokenAdvance={handleTokenAdvance}
+              signSpeed={signSpeed}
+              cameraPreset={cameraPreset}
             />
           </Suspense>
 
@@ -414,8 +418,53 @@ export default function Page() {
             </div>
           )}
 
+          {/* Speed control card */}
+          <div className="glass rounded-2xl p-5 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <label htmlFor="speed-slider" className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                Sign Speed
+              </label>
+              <span className="text-xs font-mono text-blue-400">{signSpeed.toFixed(1)}×</span>
+            </div>
+            <input
+              id="speed-slider"
+              type="range"
+              min={0.5}
+              max={2.0}
+              step={0.1}
+              value={signSpeed}
+              onChange={(e) => setSignSpeed(parseFloat(e.target.value))}
+              className="w-full h-1.5 rounded-full appearance-none bg-white/10 accent-blue-500 cursor-pointer"
+            />
+            <div className="flex justify-between text-[10px] text-gray-600">
+              <span>0.5× Slow</span><span>1× Normal</span><span>2× Fast</span>
+            </div>
+          </div>
+
+          {/* Camera preset card */}
+          <div className="glass rounded-2xl p-5 flex flex-col gap-3">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Camera View</p>
+            <div className="flex gap-2">
+              {(['front', 'side', 'angle'] as const).map((preset) => (
+                <button
+                  key={preset}
+                  id={`cam-${preset}`}
+                  onClick={() => setCameraPreset(preset)}
+                  className={[
+                    'flex-1 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all duration-200',
+                    cameraPreset === preset
+                      ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30'
+                      : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white',
+                  ].join(' ')}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Info card */}
-          <div className="glass rounded-2xl p-5 flex flex-col gap-2 mt-auto">
+          <div className="glass rounded-2xl p-5 flex flex-col gap-2">
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
               How it works
             </p>
