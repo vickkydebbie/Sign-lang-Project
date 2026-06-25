@@ -1,4 +1,4 @@
-// File: C:\Users\PC\Desktop\Antiiiiiii\app\layout.tsx
+// File: /home/jude.i.n/monica/Sign-lang-Project/app/layout.tsx
 import * as entry from '../../../app/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

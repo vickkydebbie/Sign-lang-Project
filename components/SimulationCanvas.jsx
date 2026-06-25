@@ -1,16 +1,17 @@
 'use client';
 
 /**
- * SimulationCanvas.jsx
+ * SimulationCanvas.jsx  —  Sprint 3
  *
- * React Three Fiber 3D canvas containing:
- *  - Environment / lighting
- *  - GLTF hand rig loaded via useGLTF
- *  - Per-frame LERP bone driving via useFrame
- *  - Deterministic sign sequencing driven by token queue from parent
+ * Upgrades over Sprint 2:
+ *  - signSpeed prop (0.5×–2×) scales SIGN_HOLD_DURATION per-frame
+ *  - Two-phase sign transitions: each sign briefly returns to REST before
+ *    advancing, making individual signs visually distinct
+ *  - Idle breathing animation (subtle wrist oscillation when not signing)
+ *  - cameraPreset prop: 'front' | 'side' | 'angle' repositions camera
  */
 
-import { useRef, useEffect, useMemo, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, OrbitControls, Environment, Center, ContactShadows } from '@react-three/drei';
 import * as THREE from 'three';
@@ -19,13 +20,19 @@ import * as THREE from 'three';
 // Constants
 // ---------------------------------------------------------------------------
 
-/** How long (seconds) to hold each sign before advancing */
-const SIGN_HOLD_DURATION = 0.9;
+/** Base hold time per sign in seconds (scaled by signSpeed prop) */
+const BASE_HOLD_DURATION = 0.9;
 
-/** LERP speed — higher = faster transitions (applied per frame: 1 - (1-speed)^dt*60) */
+/** Fraction of hold time spent in REST "buffer" between signs */
+const TRANSITION_FRACTION = 0.25;
+
+/** LERP speed during active signing */
 const LERP_SPEED = 8.0;
 
-/** Neutral / rest pose: all finger joints at 0 */
+/** Faster LERP for the REST buffer phase */
+const LERP_SPEED_REST = 14.0;
+
+/** Neutral / rest pose */
 const REST_POSE = [
   { bone: 'mixamorig:RightHand',        x: 0, y: 0,    z: -0.15 },
   { bone: 'mixamorig:RightHandThumb1',  x: 0, y: 0.3,  z: 0.2   },
@@ -45,54 +52,51 @@ const REST_POSE = [
   { bone: 'mixamorig:RightHandPinky3',  x: 0, y: 0,    z: 0     },
 ];
 
+// Camera preset positions [x, y, z] and lookAt target
+const CAMERA_PRESETS = {
+  front: { pos: [0,  0.2, 2.4], look: [0, 0, 0] },
+  side:  { pos: [2.2, 0.2, 1.2], look: [0, 0, 0] },
+  angle: { pos: [1.4, 0.6, 2.0], look: [0, -0.1, 0] },
+};
+
 // ---------------------------------------------------------------------------
-// Utility
+// Utilities
 // ---------------------------------------------------------------------------
 
-/**
- * Build a bone lookup map { boneName: THREE.Bone } from a SkinnedMesh scene.
- * Traverses the entire scene graph.
- */
 function buildBoneMap(scene) {
   const map = {};
   scene.traverse((obj) => {
-    if (obj.isBone || obj.type === 'Bone') {
-      map[obj.name] = obj;
-    }
-    // Also check SkinnedMesh skeleton bones
+    if (obj.isBone || obj.type === 'Bone') map[obj.name] = obj;
     if (obj.isSkinnedMesh && obj.skeleton) {
-      for (const bone of obj.skeleton.bones) {
-        map[bone.name] = bone;
-      }
+      for (const bone of obj.skeleton.bones) map[bone.name] = bone;
     }
   });
   return map;
 }
 
-/**
- * Frame-rate-independent LERP factor.
- * Returns a factor that, when applied each frame, gives a smooth transition
- * regardless of frame rate.
- *
- * factor = 1 - (1 - speed/60)^(delta * 60)
- * Simplified to: 1 - e^(-speed * delta)  (equivalent for small delta)
- */
+function detectBonePrefix(boneMap) {
+  const names = Object.keys(boneMap);
+  if (names.some((n) => n.startsWith('mixamorig1:'))) return 'mixamorig1:';
+  return 'mixamorig:';
+}
+
+function remapPosePrefix(pose, detectedPrefix) {
+  const SRC = 'mixamorig:';
+  if (detectedPrefix === SRC) return pose;
+  return pose.map(({ bone, x, y, z }) => ({
+    bone: bone.replace(SRC, detectedPrefix), x, y, z,
+  }));
+}
+
+/** Frame-rate-independent LERP factor via exponential decay */
 function lerpFactor(speed, delta) {
   return 1 - Math.exp(-speed * delta);
 }
 
-/**
- * Apply a pose (array of { bone, x, y, z }) to a boneMap using LERP.
- * @param {Record<string,THREE.Bone>} boneMap
- * @param {Array<{bone:string,x:number,y:number,z:number}>} targetPose
- * @param {number} alpha - LERP alpha [0,1]
- */
 function applyPoseLerp(boneMap, targetPose, alpha) {
   for (const { bone: boneName, x, y, z } of targetPose) {
     const bone = boneMap[boneName];
     if (!bone) continue;
-
-    // THREE.MathUtils.lerp: lerp(a, b, t) = a + (b - a) * t
     bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, x, alpha);
     bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, y, alpha);
     bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, z, alpha);
@@ -100,70 +104,170 @@ function applyPoseLerp(boneMap, targetPose, alpha) {
 }
 
 // ---------------------------------------------------------------------------
-// HandRig – inner R3F component
+// CameraController — smooth camera transitions on preset change
 // ---------------------------------------------------------------------------
 
-function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
-  const { scene } = useGLTF('/model.glb');
-  const boneMapRef   = useRef({});
-  const stateRef     = useRef({
-    tokenIndex: -1,   // -1 → showing rest pose
-    holdTimer:  0,
-    currentPose: REST_POSE,
+function CameraController({ preset }) {
+  const { camera } = useThree();
+  const targetRef = useRef(CAMERA_PRESETS.front);
+  const timeRef   = useRef(0);
+
+  useEffect(() => {
+    targetRef.current = CAMERA_PRESETS[preset] ?? CAMERA_PRESETS.front;
+    timeRef.current   = 0;
+  }, [preset]);
+
+  // Initial position
+  useEffect(() => {
+    const { pos, look } = CAMERA_PRESETS.front;
+    camera.position.set(...pos);
+    camera.lookAt(...look);
+    camera.updateProjectionMatrix();
+  }, [camera]);
+
+  useFrame((_, delta) => {
+    const { pos, look } = targetRef.current;
+    timeRef.current += delta;
+    const t = Math.min(timeRef.current / 0.6, 1); // 600ms transition
+    const alpha = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // ease-in-out
+
+    camera.position.x = THREE.MathUtils.lerp(camera.position.x, pos[0], alpha * delta * 5);
+    camera.position.y = THREE.MathUtils.lerp(camera.position.y, pos[1], alpha * delta * 5);
+    camera.position.z = THREE.MathUtils.lerp(camera.position.z, pos[2], alpha * delta * 5);
+    camera.lookAt(...look);
   });
 
-  // Build bone map once the scene loads
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// HandRig — Sprint 3: two-phase transitions + idle breathing + speed scaling
+// ---------------------------------------------------------------------------
+
+function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying, signSpeed }) {
+  const { scene } = useGLTF('/model.glb');
+  const boneMapRef    = useRef({});
+  const bonePrefixRef = useRef('mixamorig:');
+  const timeRef       = useRef(0); // for idle breathing
+
+  /**
+   * phase: 'sign'   — showing the target pose
+   *        'buffer' — briefly returning to REST before advancing
+   */
+  const stateRef = useRef({
+    tokenIndex:  -1,
+    holdTimer:   0,
+    phase:       'sign',
+    currentPose: REST_POSE,
+    nextPose:    REST_POSE,
+  });
+
+  // Build bone map + detect prefix on model load
   useEffect(() => {
-    boneMapRef.current = buildBoneMap(scene);
+    const map    = buildBoneMap(scene);
+    const prefix = detectBonePrefix(map);
+    boneMapRef.current    = map;
+    bonePrefixRef.current = prefix;
+
+    // ── DEBUG: log scene contents to browser console ──
+    const meshes = [];
+    const bones  = [];
+    scene.traverse((obj) => {
+      if (obj.isMesh)       meshes.push(`MESH: ${obj.name} (verts: ${obj.geometry?.attributes?.position?.count ?? '?'})`);
+      if (obj.isBone)       bones.push(`BONE: ${obj.name}`);
+    });
+    console.group('%c[ASL] model.glb scene contents', 'color:#60a5fa;font-weight:bold');
+    console.log('Detected bone prefix:', prefix);
+    console.log(`Meshes (${meshes.length}):`, meshes.length ? meshes : '⚠️ NONE — model has no visible geometry!');
+    console.log(`Bones  (${bones.length}):`, bones.length ? bones.slice(0, 8) : '⚠️ NONE');
+    if (meshes.length === 0) console.warn('❌ model.glb contains no mesh geometry. Replace public/model.glb with your actual avatar GLB file.');
+    console.groupEnd();
+    stateRef.current.currentPose = remapPosePrefix(REST_POSE, prefix);
+    stateRef.current.nextPose    = remapPosePrefix(REST_POSE, prefix);
   }, [scene]);
 
-  // When new tokens arrive or playback starts, reset to first token
+  // Reset when tokens/playback changes
   useEffect(() => {
+    const prefix = bonePrefixRef.current;
     if (isPlaying && tokens.length > 0) {
-      stateRef.current.tokenIndex = 0;
-      stateRef.current.holdTimer  = 0;
-      stateRef.current.currentPose = dictionary[tokens[0].token] ?? REST_POSE;
+      const rawPose = dictionary[tokens[0].token] ?? REST_POSE;
+      stateRef.current.tokenIndex  = 0;
+      stateRef.current.holdTimer   = 0;
+      stateRef.current.phase       = 'sign';
+      stateRef.current.currentPose = remapPosePrefix(rawPose, prefix);
     } else if (!isPlaying) {
       stateRef.current.tokenIndex  = -1;
       stateRef.current.holdTimer   = 0;
-      stateRef.current.currentPose = REST_POSE;
+      stateRef.current.phase       = 'sign';
+      stateRef.current.currentPose = remapPosePrefix(REST_POSE, prefix);
     }
   }, [isPlaying, tokens, dictionary]);
 
   useFrame((_, delta) => {
     const state   = stateRef.current;
     const boneMap = boneMapRef.current;
+    const prefix  = bonePrefixRef.current;
     if (!boneMap || Object.keys(boneMap).length === 0) return;
 
-    const alpha = lerpFactor(LERP_SPEED, delta);
+    const speed     = Math.max(0.25, Math.min(signSpeed ?? 1.0, 3.0));
+    const holdTime  = BASE_HOLD_DURATION / speed;
+    const bufTime   = holdTime * TRANSITION_FRACTION;
+    const signTime  = holdTime - bufTime;
 
+    // ── Idle mode: breathing oscillation on wrist bone ──
     if (!isPlaying || tokens.length === 0 || state.tokenIndex < 0) {
-      // Smoothly return to rest pose
-      applyPoseLerp(boneMap, REST_POSE, alpha);
+      timeRef.current += delta;
+      const restPoseMapped = remapPosePrefix(REST_POSE, prefix);
+      const alpha = lerpFactor(LERP_SPEED, delta);
+      applyPoseLerp(boneMap, restPoseMapped, alpha);
+
+      // Subtle idle breathing: oscillate wrist Z
+      const wristName = `${prefix}RightHand`;
+      const wrist = boneMap[wristName];
+      if (wrist) {
+        wrist.rotation.z = THREE.MathUtils.lerp(
+          wrist.rotation.z,
+          -0.15 + Math.sin(timeRef.current * 1.1) * 0.04,
+          0.05
+        );
+        wrist.rotation.y = THREE.MathUtils.lerp(
+          wrist.rotation.y,
+          Math.sin(timeRef.current * 0.7) * 0.03,
+          0.03
+        );
+      }
       return;
     }
 
-    // --- Advance sequencing ---
+    // ── Active sequencing ──
     state.holdTimer += delta;
-    if (state.holdTimer >= SIGN_HOLD_DURATION) {
+
+    if (state.phase === 'sign' && state.holdTimer >= signTime) {
+      // Transition to REST buffer before advancing
+      state.holdTimer   = 0;
+      state.phase       = 'buffer';
+      state.currentPose = remapPosePrefix(REST_POSE, prefix);
+    } else if (state.phase === 'buffer' && state.holdTimer >= bufTime) {
+      // Buffer done — advance to next token
       state.holdTimer = 0;
+      state.phase     = 'sign';
       const nextIndex = state.tokenIndex + 1;
 
       if (nextIndex >= tokens.length) {
-        // Finished all tokens
         state.tokenIndex  = -1;
-        state.currentPose = REST_POSE;
-        onTokenAdvance(-1); // signal completion
+        state.currentPose = remapPosePrefix(REST_POSE, prefix);
+        onTokenAdvance(-1);
       } else {
         state.tokenIndex  = nextIndex;
-        const nextToken   = tokens[nextIndex].token;
-        state.currentPose = dictionary[nextToken] ?? REST_POSE;
+        const rawPose     = dictionary[tokens[nextIndex].token] ?? REST_POSE;
+        state.currentPose = remapPosePrefix(rawPose, prefix);
         onTokenAdvance(nextIndex);
       }
     }
 
-    // --- Apply LERP to current target pose ---
-    applyPoseLerp(boneMap, state.currentPose, alpha);
+    // Apply pose — use faster LERP during REST buffer for snappy reset
+    const lerpSpd = state.phase === 'buffer' ? LERP_SPEED_REST : LERP_SPEED;
+    applyPoseLerp(boneMap, state.currentPose, lerpFactor(lerpSpd, delta));
   });
 
   return (
@@ -173,92 +277,69 @@ function HandRig({ tokens, dictionary, onTokenAdvance, isPlaying }) {
   );
 }
 
-// Pre-load the model so it's cached before the component mounts
 useGLTF.preload('/model.glb');
 
 // ---------------------------------------------------------------------------
-// Fallback placeholder hand (shown when model.glb is unavailable)
+// Fallback procedural hand
 // ---------------------------------------------------------------------------
 
 function FallbackHand({ tokens, isPlaying, activeIndex }) {
-  const groupRef    = useRef();
-  const stateRef    = useRef({ time: 0 });
+  const groupRef = useRef();
+  const timeRef  = useRef(0);
 
-  // Simple idle float animation
   useFrame((_, delta) => {
-    stateRef.current.time += delta;
+    timeRef.current += delta;
     if (groupRef.current) {
-      groupRef.current.position.y = Math.sin(stateRef.current.time * 1.2) * 0.05;
-      groupRef.current.rotation.y = Math.sin(stateRef.current.time * 0.5) * 0.08;
+      groupRef.current.position.y = Math.sin(timeRef.current * 1.2) * 0.05;
+      groupRef.current.rotation.y = Math.sin(timeRef.current * 0.5) * 0.08;
     }
   });
 
   const color = isPlaying ? '#60a5fa' : '#334155';
-
   return (
     <group ref={groupRef} position={[0, 0, 0]}>
-      {/* Palm */}
       <mesh castShadow>
         <boxGeometry args={[0.55, 0.65, 0.18]} />
         <meshStandardMaterial color={color} roughness={0.4} metalness={0.15} />
       </mesh>
-      {/* Fingers (5 boxes) */}
       {[-0.22, -0.11, 0, 0.11, 0.22].map((x, i) => (
         <mesh key={i} position={[x, 0.52, 0]} castShadow>
           <boxGeometry args={[0.09, 0.28, 0.1]} />
           <meshStandardMaterial color={color} roughness={0.4} metalness={0.15} />
         </mesh>
       ))}
-      {/* Thumb */}
       <mesh position={[-0.33, 0.08, 0]} rotation={[0, 0, 0.7]} castShadow>
         <boxGeometry args={[0.09, 0.23, 0.1]} />
         <meshStandardMaterial color={color} roughness={0.4} metalness={0.15} />
       </mesh>
-      {/* Current sign label */}
-      {isPlaying && tokens[activeIndex] && (
-        <group position={[0, 0.95, 0]}>
-          {/* We can't render text in a fallback without @react-three/drei Text, 
-              but we keep this slot for extension */}
-        </group>
-      )}
     </group>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Scene wrapper — handles GLTF error boundary
+// Scene content wrapper
 // ---------------------------------------------------------------------------
 
-function SceneContent({ tokens, dictionary, onTokenAdvance, isPlaying, activeIndex }) {
+function SceneContent({ tokens, dictionary, onTokenAdvance, isPlaying, activeIndex, signSpeed }) {
   const [modelError, setModelError] = useState(false);
-
   const handleError = useCallback(() => setModelError(true), []);
 
-  // Try load model, fall back gracefully
   if (modelError) {
-    return (
-      <FallbackHand
-        tokens={tokens}
-        isPlaying={isPlaying}
-        activeIndex={activeIndex}
-      />
-    );
+    return <FallbackHand tokens={tokens} isPlaying={isPlaying} activeIndex={activeIndex} />;
   }
-
   return (
     <ModelLoader
       tokens={tokens}
       dictionary={dictionary}
       onTokenAdvance={onTokenAdvance}
       isPlaying={isPlaying}
+      signSpeed={signSpeed}
       onError={handleError}
     />
   );
 }
 
-function ModelLoader({ tokens, dictionary, onTokenAdvance, isPlaying, onError }) {
-  // Attempt to load — if useGLTF throws suspend, Suspense handles it.
-  // If the file truly 404s we catch in ErrorBoundary in SimulationCanvas.
+function ModelLoader({ tokens, dictionary, onTokenAdvance, isPlaying, signSpeed, onError }) {
   try {
     return (
       <HandRig
@@ -266,6 +347,7 @@ function ModelLoader({ tokens, dictionary, onTokenAdvance, isPlaying, onError })
         dictionary={dictionary}
         onTokenAdvance={onTokenAdvance}
         isPlaying={isPlaying}
+        signSpeed={signSpeed}
       />
     );
   } catch {
@@ -275,37 +357,27 @@ function ModelLoader({ tokens, dictionary, onTokenAdvance, isPlaying, onError })
 }
 
 // ---------------------------------------------------------------------------
-// CameraSetup – positions camera once
-// ---------------------------------------------------------------------------
-
-function CameraSetup() {
-  const { camera } = useThree();
-  useEffect(() => {
-    camera.position.set(0, 0.2, 2.4);
-    camera.lookAt(0, 0, 0);
-    camera.updateProjectionMatrix();
-  }, [camera]);
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Public export: SimulationCanvas
+// Public export
 // ---------------------------------------------------------------------------
 
 /**
- * @param {object}  props
- * @param {Array}   props.tokens      - Tokenized output from nlpUtils.tokenize()
- * @param {object}  props.dictionary  - Full dictionary map from loadDictionary()
- * @param {boolean} props.isPlaying   - True while animation should play
- * @param {number}  props.activeIndex - Index of currently displayed token
- * @param {function} props.onTokenAdvance - Called with new index each time a sign advances
+ * @param {object}   props
+ * @param {Array}    props.tokens         - Tokenized output from nlpUtils
+ * @param {object}   props.dictionary     - Full dictionary map
+ * @param {boolean}  props.isPlaying      - Playback state
+ * @param {number}   props.activeIndex    - Current token index
+ * @param {function} props.onTokenAdvance - Callback on sign advance
+ * @param {number}   props.signSpeed      - Speed multiplier 0.5–2.0
+ * @param {string}   props.cameraPreset   - 'front' | 'side' | 'angle'
  */
 export default function SimulationCanvas({
-  tokens = [],
-  dictionary = {},
-  isPlaying = false,
-  activeIndex = 0,
+  tokens        = [],
+  dictionary    = {},
+  isPlaying     = false,
+  activeIndex   = 0,
   onTokenAdvance = () => {},
+  signSpeed     = 1.0,
+  cameraPreset  = 'front',
 }) {
   return (
     <div className="w-full h-full relative">
@@ -315,9 +387,9 @@ export default function SimulationCanvas({
         gl={{ antialias: true, alpha: true }}
         style={{ background: 'transparent' }}
       >
-        <CameraSetup />
+        <CameraController preset={cameraPreset} />
 
-        {/* Ambient + directional lighting */}
+        {/* Lighting */}
         <ambientLight intensity={0.6} />
         <directionalLight
           castShadow
@@ -335,10 +407,8 @@ export default function SimulationCanvas({
         <pointLight position={[-4, 2, -4]} intensity={0.4} color="#a78bfa" />
         <pointLight position={[4, 1, 2]}  intensity={0.3} color="#60a5fa" />
 
-        {/* Environment preset for reflections */}
         <Environment preset="studio" />
 
-        {/* Contact shadow on ground */}
         <ContactShadows
           position={[0, -1.6, 0]}
           opacity={0.45}
@@ -348,16 +418,15 @@ export default function SimulationCanvas({
           color="#1e1b4b"
         />
 
-        {/* Main content */}
         <SceneContent
           tokens={tokens}
           dictionary={dictionary}
           isPlaying={isPlaying}
           activeIndex={activeIndex}
           onTokenAdvance={onTokenAdvance}
+          signSpeed={signSpeed}
         />
 
-        {/* Orbit controls: allow user to inspect from any angle */}
         <OrbitControls
           enablePan={false}
           minDistance={1.2}
